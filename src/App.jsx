@@ -1,19 +1,28 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 
 const defaultUsername = 'Hari'
 const defaultPassword = 'Hari@123'
+const usersApiUrl = 'https://dummyjson.com/users'
 
-const startingCustomers = [
-  { id: 1, name: 'Olivia Rhye', email: 'olivia.rhye@company.com', phone: '(415) 555-0132' },
-  { id: 2, name: 'Phoenix Baker', email: 'phoenix.baker@company.com', phone: '(415) 555-0184' },
-  { id: 3, name: 'Lana Steiner', email: 'lana.steiner@company.com', phone: '(415) 555-0126' },
-  { id: 4, name: 'Demi Wilkinson', email: 'demi.wilkinson@company.com', phone: '(415) 555-0179' },
-  { id: 5, name: 'Candice Wu', email: 'candice.wu@company.com', phone: '(415) 555-0141' },
-  { id: 6, name: 'Natali Craig', email: 'natali.craig@company.com', phone: '(415) 555-0168' },
-  { id: 7, name: 'Drew Cano', email: 'drew.cano@company.com', phone: '(415) 555-0193' },
-  { id: 8, name: 'Orlando Diggs', email: 'orlando.diggs@company.com', phone: '(415) 555-0117' },
-]
+function mapApiUser(user) {
+  return {
+    id: user.id,
+    name: `${user.firstName} ${user.lastName}`.trim(),
+    email: user.email,
+    phone: user.phone,
+  }
+}
+
+function mapCustomerToApi(customer) {
+  const [firstName, ...lastNameParts] = customer.name.trim().split(/\s+/)
+  return {
+    firstName,
+    lastName: lastNameParts.join(' '),
+    email: customer.email,
+    phone: customer.phone,
+  }
+}
 
 function SearchIcon() {
   return (
@@ -33,7 +42,13 @@ function PlusIcon() {
 }
 
 function App() {
-  const [customers, setCustomers] = useState(startingCustomers)
+  const [customers, setCustomers] = useState([])
+  const [customerLoading, setCustomerLoading] = useState(false)
+  const [customerLoadError, setCustomerLoadError] = useState('')
+  const [customerActionError, setCustomerActionError] = useState('')
+  const [reloadAttempt, setReloadAttempt] = useState(0)
+  const [isSaving, setIsSaving] = useState(false)
+  const [isDeleting, setIsDeleting] = useState(false)
   const [isAuthenticated, setIsAuthenticated] = useState(false)
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
@@ -43,6 +58,39 @@ function App() {
   const [editingCustomer, setEditingCustomer] = useState(null)
   const [customerToDelete, setCustomerToDelete] = useState(null)
   const [formValues, setFormValues] = useState({ name: '', email: '', phone: '' })
+  const hasLoadedCustomers = useRef(false)
+  const locallyAddedCustomerIds = useRef(new Set())
+
+  useEffect(() => {
+    if (!isAuthenticated || hasLoadedCustomers.current) return undefined
+
+    const controller = new AbortController()
+
+    async function loadCustomers() {
+      setCustomerLoading(true)
+      setCustomerLoadError('')
+
+      try {
+        const response = await fetch(usersApiUrl, { signal: controller.signal })
+        if (!response.ok) throw new Error(`Request failed with status ${response.status}`)
+
+        const data = await response.json()
+        if (!Array.isArray(data.users)) throw new Error('The customer list response was invalid')
+
+        setCustomers(data.users.map(mapApiUser))
+        hasLoadedCustomers.current = true
+      } catch (error) {
+        if (error.name !== 'AbortError') {
+          setCustomerLoadError('Unable to load customers. Please try again.')
+        }
+      } finally {
+        if (!controller.signal.aborted) setCustomerLoading(false)
+      }
+    }
+
+    loadCustomers()
+    return () => controller.abort()
+  }, [isAuthenticated, reloadAttempt])
 
   const filteredCustomers = useMemo(() => {
     const query = search.trim().toLowerCase()
@@ -54,44 +102,94 @@ function App() {
   }, [customers, search])
 
   function openAddForm() {
+    setCustomerActionError('')
     setEditingCustomer(null)
     setFormValues({ name: '', email: '', phone: '' })
     setFormOpen(true)
   }
 
   function openEditForm(customer) {
+    setCustomerActionError('')
     setEditingCustomer(customer)
     setFormValues({ name: customer.name, email: customer.email, phone: customer.phone })
     setFormOpen(true)
   }
 
   function closeForm() {
+    setCustomerActionError('')
     setFormOpen(false)
     setEditingCustomer(null)
   }
 
-  function handleSubmit(event) {
+  async function handleSubmit(event) {
     event.preventDefault()
     const customer = {
       name: formValues.name.trim(),
       email: formValues.email.trim(),
       phone: formValues.phone.trim(),
     }
-
-    if (editingCustomer) {
-      setCustomers((current) =>
-        current.map((item) => (item.id === editingCustomer.id ? { ...item, ...customer } : item)),
-      )
-    } else {
-      setCustomers((current) => [{ id: Date.now(), ...customer }, ...current])
+    if (!customer.name || !customer.email || !customer.phone) {
+      setCustomerActionError('Please fill in all customer fields.')
+      return
     }
 
-    closeForm()
+    setIsSaving(true)
+    setCustomerActionError('')
+    try {
+      const payload = mapCustomerToApi(customer)
+      const response = await fetch(
+        editingCustomer ? `${usersApiUrl}/${editingCustomer.id}` : `${usersApiUrl}/add`,
+        {
+          method: editingCustomer ? 'PUT' : 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        },
+      )
+      const localSimulation = editingCustomer
+        && response.status === 404
+        && locallyAddedCustomerIds.current.has(editingCustomer.id)
+      if (!response.ok && !localSimulation) throw new Error(`Request failed with status ${response.status}`)
+
+      if (editingCustomer) {
+        const data = localSimulation ? payload : await response.json()
+        const updatedCustomer = mapApiUser({ ...payload, ...data, id: editingCustomer.id })
+        setCustomers((current) =>
+          current.map((item) => (item.id === editingCustomer.id ? updatedCustomer : item)),
+        )
+      } else {
+        const addedCustomer = mapApiUser(await response.json())
+        locallyAddedCustomerIds.current.add(addedCustomer.id)
+        setCustomers((current) => [addedCustomer, ...current])
+      }
+      closeForm()
+    } catch {
+      setCustomerActionError(
+        editingCustomer
+          ? 'Unable to update customer. Please try again.'
+          : 'Unable to add customer. Please try again.',
+      )
+    } finally {
+      setIsSaving(false)
+    }
   }
 
-  function confirmDelete() {
-    setCustomers((current) => current.filter((customer) => customer.id !== customerToDelete.id))
-    setCustomerToDelete(null)
+  async function confirmDelete() {
+    setIsDeleting(true)
+    setCustomerActionError('')
+    try {
+      const response = await fetch(`${usersApiUrl}/${customerToDelete.id}`, { method: 'DELETE' })
+      const localSimulation = response.status === 404
+        && locallyAddedCustomerIds.current.has(customerToDelete.id)
+      if (!response.ok && !localSimulation) throw new Error(`Request failed with status ${response.status}`)
+
+      setCustomers((current) => current.filter((customer) => customer.id !== customerToDelete.id))
+      locallyAddedCustomerIds.current.delete(customerToDelete.id)
+      setCustomerToDelete(null)
+    } catch {
+      setCustomerActionError('Unable to delete customer. Please try again.')
+    } finally {
+      setIsDeleting(false)
+    }
   }
 
   function handleLogin(event) {
@@ -196,7 +294,7 @@ function App() {
         <header className="topbar">
           <div className="breadcrumb">Workspace <span>/</span> Customers</div>
           <div className="topbar-actions">
-            <div className="topbar-note"><span className="status-dot" /> Local demo data</div>
+            <div className="topbar-note"><span className="status-dot" /> DummyJSON API</div>
             <button className="logout-button" type="button" onClick={handleLogout}>Logout</button>
           </div>
         </header>
@@ -208,7 +306,7 @@ function App() {
               <h1>Customers</h1>
               <p className="page-description">Keep track of your customer contacts all in one place.</p>
             </div>
-            <button className="primary-button" type="button" onClick={openAddForm}>
+            <button className="primary-button" type="button" onClick={openAddForm} disabled={customerLoading}>
               <PlusIcon />
               Add customer
             </button>
@@ -223,7 +321,7 @@ function App() {
             </div>
             <div className="summary-copy">
               <span>Total customers</span>
-              <strong>{customers.length}</strong>
+              <strong>{customerLoading ? '—' : customers.length}</strong>
             </div>
             <div className="summary-divider" />
             <p>Your customer list is up to date.</p>
@@ -232,7 +330,7 @@ function App() {
           <section className="directory-card" aria-label="Customer directory">
             <div className="directory-toolbar">
               <div>
-                <h2>All customers <span className="count-pill">{customers.length}</span></h2>
+                <h2>All customers <span className="count-pill">{customerLoading ? '…' : customers.length}</span></h2>
                 <p>A list of everyone in your directory.</p>
               </div>
               <label className="search-field">
@@ -248,68 +346,88 @@ function App() {
               </label>
             </div>
 
-            <div className="table-scroll">
-              <table>
-                <thead>
-                  <tr>
-                    <th scope="col">Name</th>
-                    <th scope="col">Email address</th>
-                    <th scope="col">Phone number</th>
-                    <th scope="col"><span className="visually-hidden">Actions</span></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredCustomers.map((customer, index) => (
-                    <tr key={customer.id}>
-                      <td>
-                        <div className="customer-name">
-                          <span className={`customer-avatar avatar-${index % 6}`}>
-                            {customer.name.split(/\s+/).map((part) => part[0]).slice(0, 2).join('')}
-                          </span>
-                          <span className="name-text">{customer.name}</span>
-                        </div>
-                      </td>
-                      <td><a className="contact-link" href={`mailto:${customer.email}`}>{customer.email}</a></td>
-                      <td><a className="contact-link" href={`tel:${customer.phone.replace(/[^\d+]/g, '')}`}>{customer.phone}</a></td>
-                      <td>
-                        <div className="row-actions">
-                          <button type="button" onClick={() => openEditForm(customer)} aria-label={`Edit ${customer.name}`}>
-                            Edit
-                          </button>
-                          <button
-                            className="delete-action"
-                            type="button"
-                            onClick={() => setCustomerToDelete(customer)}
-                            aria-label={`Delete ${customer.name}`}
-                          >
-                            Delete
-                          </button>
-                        </div>
-                      </td>
+            {customerLoading ? (
+              <div className="data-state" role="status">Loading customers…</div>
+            ) : customerLoadError ? (
+              <div className="data-state data-error-state" role="alert">
+                <p>{customerLoadError}</p>
+                <button className="secondary-button" type="button" onClick={() => setReloadAttempt((attempt) => attempt + 1)}>
+                  Try again
+                </button>
+              </div>
+            ) : (
+              <div className="table-scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th scope="col">Name</th>
+                      <th scope="col">Email address</th>
+                      <th scope="col">Phone number</th>
+                      <th scope="col"><span className="visually-hidden">Actions</span></th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-              {filteredCustomers.length === 0 && (
-                <div className="empty-state">
-                  <div className="empty-icon"><SearchIcon /></div>
-                  <h3>{customers.length === 0 ? 'No customers yet' : 'No customers found'}</h3>
-                  <p>
-                    {customers.length === 0
-                      ? 'Add a customer to start building your directory.'
-                      : 'Try another name, email address, or phone number.'}
-                  </p>
-                  {customers.length === 0 && (
-                    <button className="primary-button" type="button" onClick={openAddForm}>
-                      <PlusIcon />
-                      Add customer
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
+                  </thead>
+                  <tbody>
+                    {filteredCustomers.map((customer, index) => (
+                      <tr key={customer.id}>
+                        <td>
+                          <div className="customer-name">
+                            <span className={`customer-avatar avatar-${index % 6}`}>
+                              {customer.name.split(/\s+/).map((part) => part[0]).slice(0, 2).join('')}
+                            </span>
+                            <span className="name-text">{customer.name}</span>
+                          </div>
+                        </td>
+                        <td><a className="contact-link" href={`mailto:${customer.email}`}>{customer.email}</a></td>
+                        <td><a className="contact-link" href={`tel:${customer.phone.replace(/[^\d+]/g, '')}`}>{customer.phone}</a></td>
+                        <td>
+                          <div className="row-actions">
+                            <button type="button" onClick={() => openEditForm(customer)} aria-label={`Edit ${customer.name}`}>
+                              Edit
+                            </button>
+                            <button
+                              className="delete-action"
+                              type="button"
+                              onClick={() => {
+                                setCustomerActionError('')
+                                setCustomerToDelete(customer)
+                              }}
+                              aria-label={`Delete ${customer.name}`}
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {filteredCustomers.length === 0 && (
+                  <div className="empty-state">
+                    <div className="empty-icon"><SearchIcon /></div>
+                    <h3>{customers.length === 0 ? 'No customers yet' : 'No customers found'}</h3>
+                    <p>
+                      {customers.length === 0
+                        ? 'Add a customer to start building your directory.'
+                        : 'Try another name, email address, or phone number.'}
+                    </p>
+                    {customers.length === 0 && (
+                      <button className="primary-button" type="button" onClick={openAddForm} disabled={customerLoading}>
+                        <PlusIcon />
+                        Add customer
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
             <div className="table-footer">
-              Showing <strong>{filteredCustomers.length}</strong> of <strong>{customers.length}</strong> customers
+              {customerLoading
+                ? 'Loading customer list…'
+                : customerLoadError
+                  ? 'Customer list unavailable'
+                  : (
+                    <>Showing <strong>{filteredCustomers.length}</strong> of <strong>{customers.length}</strong> customers</>
+                  )}
             </div>
           </section>
           <footer className="page-footer">Changes are kept in memory and reset when you refresh.</footer>
@@ -326,6 +444,7 @@ function App() {
               </div>
               <button className="modal-close" type="button" onClick={closeForm} aria-label="Close dialog">×</button>
             </div>
+            {customerActionError && <p className="api-error modal-error" role="alert">{customerActionError}</p>}
             <form onSubmit={handleSubmit}>
               <label className="form-field">
                 <span>Name <b>*</b></span>
@@ -362,8 +481,8 @@ function App() {
               </label>
               <div className="modal-actions">
                 <button className="secondary-button" type="button" onClick={closeForm}>Cancel</button>
-                <button className="primary-button" type="submit">
-                  {editingCustomer ? 'Save changes' : 'Add customer'}
+                <button className="primary-button" type="submit" disabled={isSaving}>
+                  {isSaving ? 'Saving…' : editingCustomer ? 'Save changes' : 'Add customer'}
                 </button>
               </div>
             </form>
@@ -381,9 +500,12 @@ function App() {
               </div>
               <button className="modal-close" type="button" onClick={() => setCustomerToDelete(null)} aria-label="Close dialog">×</button>
             </div>
+            {customerActionError && <p className="api-error modal-error" role="alert">{customerActionError}</p>}
             <div className="modal-actions">
               <button className="secondary-button" type="button" onClick={() => setCustomerToDelete(null)}>Cancel</button>
-              <button className="danger-button" type="button" onClick={confirmDelete}>Delete customer</button>
+              <button className="danger-button" type="button" onClick={confirmDelete} disabled={isDeleting}>
+                {isDeleting ? 'Deleting…' : 'Delete customer'}
+              </button>
             </div>
           </section>
         </div>

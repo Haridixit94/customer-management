@@ -614,6 +614,37 @@ tbody tr:last-child td {
   font-weight: 600;
 }
 
+.data-state {
+  display: flex;
+  min-height: 180px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px;
+  color: #667085;
+  font-size: 13px;
+  text-align: center;
+}
+
+.data-state p {
+  margin: 0;
+  color: #b42318;
+}
+
+.api-error {
+  border: 1px solid #fecdca;
+  border-radius: 6px;
+  background: #fef3f2;
+  padding: 10px 12px;
+  color: #b42318;
+  font-size: 12px;
+}
+
+.modal-error {
+  margin: -7px 0 18px;
+}
+
 .empty-state {
   display: flex;
   min-height: 230px;
@@ -798,6 +829,11 @@ button:focus-visible,
 a:focus-visible {
   outline: 3px solid #a5b4fc;
   outline-offset: 2px;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
 }
 
 @media (max-width: 960px) {
